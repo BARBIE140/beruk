@@ -1,24 +1,36 @@
 export default {
   async fetch(request, env, ctx) {
-    const workerUrl = new URL(request.url);
-    const proxyPrefix = `${workerUrl.origin}${workerUrl.pathname}?`;
+    const url = new URL(request.url);
+    const workerPath = url.pathname;
     
-    // Get target URL from query string
-    let targetUrlStr = workerUrl.search.substring(1);
+    // === PATH-BASED URL EXTRACTION ===
+    // Remove the leading slash to get the target URL
+    // Example: "/http://example.com/file.m3u8" → "http://example.com/file.m3u8"
+    let targetUrlStr = workerPath.startsWith('/') ? workerPath.substring(1) : workerPath;
     
-    if (!targetUrlStr && workerUrl.searchParams.has('miniProxyFormAction')) {
-      targetUrlStr = workerUrl.searchParams.get('miniProxyFormAction');
+    // Also support query parameter fallback for backward compatibility
+    if (!targetUrlStr && url.searchParams.has('url')) {
+      targetUrlStr = url.searchParams.get('url');
     }
     
-    if (!targetUrlStr) {
+    // Handle root path - show usage
+    if (!targetUrlStr || workerPath === '/') {
       return new Response(
-        `<h1>HLS Stream Proxy</h1>
-         <p>Usage: <code>${proxyPrefix}http://your-stream.com/stream.m3u8</code></p>`,
-        { headers: { 'Content-Type': 'text/html' } }
+        `<h1>🎬 HLS Stream Proxy</h1>
+         <p>Usage: Append your stream URL directly after the worker URL:</p>
+         <code>${url.origin}/http://example.com/stream.m3u8</code>
+         <h3>Example:</h3>
+         <code>${url.origin}/http://moo7-restream2025.ddns.net:9091/Sport_tv_ts7/index.m3u8</code>
+         <h3>Embed in iframe:</h3>
+         <code>&lt;iframe src="${url.origin}/http://moo7-restream2025.ddns.net:9091/Sport_tv_ts7/index.m3u8"&gt;&lt;/iframe&gt;</code>`,
+        { 
+          headers: { 'Content-Type': 'text/html;charset=UTF-8' },
+          status: 200
+        }
       );
     }
     
-    // Ensure scheme exists
+    // Ensure the target URL has a scheme
     if (!/^https?:\/\//i.test(targetUrlStr)) {
       targetUrlStr = 'http://' + targetUrlStr;
     }
@@ -27,75 +39,111 @@ export default {
     try {
       targetUrl = new URL(targetUrlStr);
     } catch (e) {
-      return new Response("Invalid URL", { status: 400 });
+      return new Response(`Error: Invalid URL "${targetUrlStr}"`, { status: 400 });
     }
     
-    // === SPECIAL HLS HANDLING ===
-    // Detect if this is a .m3u8 playlist or .ts segment
+    // === DETECT HLS CONTENT ===
     const isM3U8 = targetUrl.pathname.endsWith('.m3u8');
     const isTS = targetUrl.pathname.endsWith('.ts');
+    const isM3U8List = targetUrl.pathname.endsWith('.m3u8');
     
-    if (isM3U8) {
-      // Fetch and rewrite the playlist
-      const response = await fetch(targetUrl.toString(), {
-        headers: {
-          'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
-        }
-      });
-      
-      if (!response.ok) {
-        return new Response(`Failed to fetch playlist: ${response.status}`, { status: response.status });
-      }
-      
-      const content = await response.text();
-      const baseUrl = targetUrl.origin + targetUrl.pathname.substring(0, targetUrl.pathname.lastIndexOf('/') + 1);
-      const lines = content.split('\n');
-      const newLines = [];
-      
-      for (let line of lines) {
-        line = line.trimEnd();
-        
-        if (line === '') {
-          newLines.push(line);
-          continue;
-        }
-        
-        // Handle EXT-X-MAP (init segment)
-        if (line.startsWith('#EXT-X-MAP:')) {
-          const uriMatch = line.match(/URI="([^"]+)"/);
-          if (uriMatch) {
-            const originalUri = uriMatch[1];
-            const fullUri = originalUri.startsWith('http') ? originalUri : baseUrl + originalUri;
-            const newUri = `${workerUrl.origin}${workerUrl.pathname}?${encodeURIComponent(fullUri)}`;
-            line = line.replace(uriMatch[0], `URI="${newUri}"`);
+    // === HANDLE M3U8 PLAYLIST ===
+    if (isM3U8 || isM3U8List) {
+      try {
+        const response = await fetch(targetUrl.toString(), {
+          headers: {
+            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+            'Accept': '*/*',
           }
-          newLines.push(line);
-          continue;
+        });
+        
+        if (!response.ok) {
+          return new Response(`Failed to fetch playlist: HTTP ${response.status}`, { status: response.status });
         }
         
-        // Handle segment URLs
-        if (!line.startsWith('#')) {
-          let segmentUrl = line;
-          if (!segmentUrl.startsWith('http')) {
-            segmentUrl = baseUrl + segmentUrl;
+        const content = await response.text();
+        const baseUrl = targetUrl.origin + targetUrl.pathname.substring(0, targetUrl.pathname.lastIndexOf('/') + 1);
+        const lines = content.split('\n');
+        const newLines = [];
+        
+        for (let line of lines) {
+          line = line.trimEnd();
+          
+          if (line === '') {
+            newLines.push(line);
+            continue;
           }
-          newLines.push(`${workerUrl.origin}${workerUrl.pathname}?${encodeURIComponent(segmentUrl)}`);
-        } else {
-          newLines.push(line);
+          
+          // Handle EXT-X-MAP (initialization segment)
+          if (line.startsWith('#EXT-X-MAP:')) {
+            const uriMatch = line.match(/URI="([^"]+)"/);
+            if (uriMatch) {
+              const originalUri = uriMatch[1];
+              const fullUri = originalUri.startsWith('http') ? originalUri : baseUrl + originalUri;
+              const newUri = `${url.origin}/${encodeURIComponent(fullUri)}`;
+              line = line.replace(uriMatch[0], `URI="${newUri}"`);
+            }
+            newLines.push(line);
+            continue;
+          }
+          
+          // Handle segment URLs (lines that don't start with #)
+          if (!line.startsWith('#')) {
+            let segmentUrl = line;
+            if (!segmentUrl.startsWith('http')) {
+              segmentUrl = baseUrl + segmentUrl;
+            }
+            // Preserve the segment URL as-is in the path
+            newLines.push(`${url.origin}/${segmentUrl}`);
+          } else {
+            newLines.push(line);
+          }
         }
+        
+        return new Response(newLines.join('\n'), {
+          headers: {
+            'Content-Type': 'application/vnd.apple.mpegurl',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          }
+        });
+      } catch (error) {
+        return new Response(`Proxy error: ${error.message}`, { status: 502 });
       }
-      
-      return new Response(newLines.join('\n'), {
-        headers: {
-          'Content-Type': 'application/vnd.apple.mpegurl',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'no-cache',
-        }
-      });
     }
     
+    // === HANDLE TS SEGMENTS ===
     if (isTS) {
-      // Direct fetch for video segments
+      try {
+        const response = await fetch(targetUrl.toString(), {
+          headers: {
+            'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+            'Referer': targetUrl.origin,
+          }
+        });
+        
+        if (!response.ok) {
+          return new Response(`Failed to fetch segment: HTTP ${response.status}`, { status: response.status });
+        }
+        
+        const headers = new Headers(response.headers);
+        headers.set('Access-Control-Allow-Origin', '*');
+        headers.set('Content-Type', 'video/MP2T');
+        headers.set('Cache-Control', 'public, max-age=3600');
+        headers.delete('Content-Length'); // Let Cloudflare handle streaming
+        
+        return new Response(response.body, {
+          status: response.status,
+          headers: headers,
+        });
+      } catch (error) {
+        return new Response(`Segment error: ${error.message}`, { status: 502 });
+      }
+    }
+    
+    // === HANDLE OTHER FILE TYPES (images, videos, etc.) ===
+    try {
       const response = await fetch(targetUrl.toString(), {
         headers: {
           'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
@@ -103,108 +151,18 @@ export default {
       });
       
       if (!response.ok) {
-        return new Response(`Failed to fetch segment`, { status: response.status });
+        return new Response(`Failed to fetch: HTTP ${response.status}`, { status: response.status });
       }
       
       const headers = new Headers(response.headers);
       headers.set('Access-Control-Allow-Origin', '*');
-      headers.set('Content-Type', 'video/MP2T');
-      headers.set('Cache-Control', 'public, max-age=3600');
       
       return new Response(response.body, {
         status: response.status,
         headers: headers,
       });
+    } catch (error) {
+      return new Response(`Fetch error: ${error.message}`, { status: 502 });
     }
-    
-    // === For regular HTML/CSS/Images (your miniProxy logic) ===
-    const newHeaders = new Headers(request.headers);
-    newHeaders.delete("Host");
-    newHeaders.delete("Origin");
-    newHeaders.delete("Accept-Encoding");
-    
-    const fetchOptions = {
-      method: request.method,
-      headers: newHeaders,
-      redirect: "follow"
-    };
-    
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      let bodyBytes = await request.arrayBuffer();
-      if (request.headers.get("content-type")?.includes("application/x-www-form-urlencoded")) {
-        const bodyText = new TextDecoder().decode(bodyBytes);
-        const params = new URLSearchParams(bodyText);
-        if (params.has("miniProxyFormAction")) {
-          params.delete("miniProxyFormAction");
-        }
-        bodyBytes = new TextEncoder().encode(params.toString());
-      }
-      fetchOptions.body = bodyBytes;
-    }
-    
-    let response = await fetch(targetUrl.toString(), fetchOptions);
-    
-    const responseHeaders = new Headers(response.headers);
-    responseHeaders.delete("Content-Length");
-    responseHeaders.delete("Transfer-Encoding");
-    responseHeaders.set("Access-Control-Allow-Origin", "*");
-    responseHeaders.set("X-Robots-Tag", "noindex, nofollow");
-    
-    const contentType = responseHeaders.get("Content-Type") || "";
-    
-    // HTML rewriting (your existing logic)
-    if (contentType.includes("text/html")) {
-      const rewriter = new HTMLRewriter()
-        .on("a[href], link[href], img[src], script[src], iframe[src]", {
-          element(el) {
-            const attr = el.hasAttribute("href") ? "href" : "src";
-            const value = el.getAttribute(attr);
-            if (value && !value.startsWith("data:") && !value.startsWith("#")) {
-              try {
-                const absolute = new URL(value, targetUrl.href).href;
-                el.setAttribute(attr, proxyPrefix + absolute);
-              } catch(e) {}
-            }
-          }
-        })
-        .on("form", {
-          element(el) {
-            const action = el.getAttribute("action") || "";
-            const absoluteAction = new URL(action, targetUrl.href).href;
-            el.setAttribute("action", workerUrl.origin + workerUrl.pathname);
-            el.append(`<input type="hidden" name="miniProxyFormAction" value="${escapeHtml(absoluteAction)}" />`, { html: true });
-          }
-        });
-      
-      return rewriter.transform(new Response(response.body, { headers: responseHeaders, status: response.status }));
-    }
-    
-    // CSS handling
-    if (contentType.includes("text/css")) {
-      const css = await response.text();
-      const rewrittenCss = css.replace(/url\((.*?)\)/gi, (match, p1) => {
-        let url = p1.replace(/['"]/g, "").trim();
-        if (url.startsWith("data:")) return match;
-        try {
-          const absolute = new URL(url, targetUrl.href).href;
-          return `url("${proxyPrefix}${absolute}")`;
-        } catch(e) {
-          return match;
-        }
-      });
-      return new Response(rewrittenCss, { headers: responseHeaders });
-    }
-    
-    // Everything else (images, etc.)
-    return new Response(response.body, { headers: responseHeaders, status: response.status });
   }
-};
-
-function escapeHtml(str) {
-  return str.replace(/[&<>]/g, function(m) {
-    if (m === '&') return '&amp;';
-    if (m === '<') return '&lt;';
-    if (m === '>') return '&gt;';
-    return m;
-  });
 }
