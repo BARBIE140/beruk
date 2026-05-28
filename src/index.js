@@ -18,11 +18,11 @@ export default {
       return new Response(
         `<h1>🎬 HLS Stream Proxy</h1>
          <p>Usage: Append your stream URL directly after the worker URL:</p>
-         <code>${url.origin}/http://example.com/stream.m3u8</code>`
-   //      <h3>Example:</h3>
-   //      <code>${url.origin}/http://moo7-restream2025.ddns.net:9091/Sport_tv_ts7/index.m3u8</code>
-   //      <h3>Embed in iframe:</h3>
-   //      <code>&lt;iframe src="${url.origin}/http://moo7-restream2025.ddns.net:9091/Sport_tv_ts7/index.m3u8"&gt;&lt;/iframe&gt;</code>`,
+         <code>${url.origin}/http://example.com/stream.m3u8</code>
+         <h3>Example:</h3>
+         <code>${url.origin}/http://moo7-restream2025.ddns.net:9091/Sport_tv_ts7/index.m3u8</code>
+         <h3>Embed in iframe:</h3>
+         <code>&lt;iframe src="${url.origin}/http://moo7-restream2025.ddns.net:9091/Sport_tv_ts7/index.m3u8"&gt;&lt;/iframe&gt;</code>`,
         { 
           headers: { 'Content-Type': 'text/html;charset=UTF-8' },
           status: 200
